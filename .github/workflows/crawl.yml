@@ -1,0 +1,41 @@
+name: crawl
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet curl_cffi
+      - uses: actions/cache@v4
+        with:
+          path: .cache/details.json.gz
+          key: details-${{ github.run_id }}
+          restore-keys: details-
+      - name: Crawl
+        env:
+          CRAWL_QUERIES: ${{ secrets.CRAWL_QUERIES }}
+        run: python crawl.py --out out.json --seconds 1500 --details 600
+      - name: Encrypt
+        env:
+          CRAWL_KEY: ${{ secrets.CRAWL_KEY }}
+        run: |
+          gzip -9 out.json
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:CRAWL_KEY -in out.json.gz -out out.bin
+          rm out.json.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: out
+          path: out.bin
+          retention-days: 3
