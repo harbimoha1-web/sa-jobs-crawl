@@ -38,6 +38,13 @@ _DESC = re.compile(r'show-more-less-html__markup[^>]*>(.*?)</div>', re.S)
 _CRITERIA = re.compile(r'description__job-criteria-subheader">\s*(.*?)\s*</h3>\s*<span[^>]*>\s*(.*?)\s*</span>', re.S)
 _ORG = re.compile(r'topcard__org-name-link[^>]*>\s*(.*?)\s*</a>', re.S)
 _CLOSED = re.compile(r"No longer accepting applications", re.I)
+# How the job takes applications. Offsite postings carry the employer's link in
+# <code id="applyUrl">; LinkedIn's own form (Easy Apply) has none. Each marker is
+# counted in stats so a change in LinkedIn's markup shows in the numbers.
+_APPLY = {"apply_url": re.compile(r'id="applyUrl"'),
+          "offsite": re.compile(r"apply-link-offsite"),
+          "onsite": re.compile(r"apply-link-(?:onsite|simple)"),
+          "easy_text": re.compile(r"Easy Apply", re.I)}
 
 
 class Blocked(Exception):
@@ -105,7 +112,8 @@ def cards(page):
                      "url": f"https://www.linkedin.com/jobs/view/{bid}/",
                      "company": _text(co.group(1)) if co else "",
                      "location": _text(loc.group(1)) if loc else "Saudi Arabia",
-                     "posted_at": _day(dt.group(1)) if dt else None, "snippet": ""})
+                     "posted_at": _day(dt.group(1)) if dt else None, "snippet": "",
+                     "easy_apply": bool(_APPLY["easy_text"].search(body))})
     return rows
 
 
@@ -145,10 +153,14 @@ def detail(bid):
     crit = {k.strip().lower(): _text(v) for k, v in _CRITERIA.findall(t)}
     d, org = _DESC.search(t), _ORG.search(t)
     level = crit.get("seniority level") or ""
+    marks = [k for k, rx in _APPLY.items() if rx.search(t)]
+    apply = ("site" if {"apply_url", "offsite"} & set(marks) else
+             "easy" if {"onsite", "easy_text"} & set(marks) else None)
     return {"description": _text(d.group(1), keep_lines=True)[:DESC_CHARS] if d else "",
             "company": _text(org.group(1)) if org else None,
             "employment_type": crit.get("employment type"),
-            "career_level": level if re.search(r"director|executive|internship", level, re.I) else None}
+            "career_level": level if re.search(r"director|executive|internship", level, re.I) else None,
+            "apply": apply, "apply_marks": marks}
 
 
 def _load_cache():
@@ -176,6 +188,7 @@ def main(out, seconds, budget):
     except Blocked as e:
         stat["error"] = f"listing: {e}"
     stat["listed"] = len(rows)
+    stat["card_easy"] = sum(1 for r in rows if r.get("easy_apply"))
     print(f"listed {len(rows)} over {stat['pages']} page(s){'' if stat['complete'] else ' (incomplete)'}")
 
     cache = _load_cache()
@@ -185,7 +198,7 @@ def main(out, seconds, budget):
     details = {}
     for r in fresh:
         hit = cache.get(r["bid"])
-        if hit:
+        if hit and ("apply" in hit["d"] or hit["d"].get("closed")):   # older entries lack apply
             details[r["bid"]] = hit["d"]
             stat["cached"] += 1
             continue
@@ -201,6 +214,9 @@ def main(out, seconds, budget):
             cache[r["bid"]] = {"t": int(time.time()), "d": d}
             details[r["bid"]] = d
             stat["details"] += 1
+            for k in d.get("apply_marks") or []:
+                stat["m_" + k] = stat.get("m_" + k, 0) + 1
+            stat["apply_" + str(d.get("apply"))] = stat.get("apply_" + str(d.get("apply")), 0) + 1
     _save_cache(cache)
     stat["at"] = int(time.time())
     Path(out).write_text(json.dumps({"at": stat["at"], "stats": stat, "rows": fresh, "details": details},
